@@ -33,6 +33,7 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { TurnResponder } from "../Services/TurnResponder.ts";
 import {
   ProviderRuntimeIngestionService,
   type ProviderRuntimeIngestionShape,
@@ -692,6 +693,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const turnResponder = yield* TurnResponder;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -1031,12 +1033,17 @@ const make = Effect.gen(function* () {
       }
 
       if (input.hasProjectedMessage || hasRenderableText) {
+        const responder = yield* turnResponder.get({
+          threadId: input.threadId,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+        });
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.complete",
           commandId: yield* providerCommandId(input.event, input.commandTag),
           threadId: input.threadId,
           messageId: input.messageId,
           ...(input.turnId ? { turnId: input.turnId } : {}),
+          ...(responder !== undefined ? { responder } : {}),
           createdAt: input.createdAt,
         });
       }
@@ -1412,6 +1419,13 @@ const make = Effect.gen(function* () {
                 : (thread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
+          // The reactor parked this turn's model selection before the provider
+          // named the turn; claim it now so later completions can be labelled
+          // per turn instead of per thread.
+          if (event.type === "turn.started" && eventTurnId !== undefined) {
+            yield* turnResponder.bind({ threadId: thread.id, turnId: eventTurnId });
+          }
+
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
